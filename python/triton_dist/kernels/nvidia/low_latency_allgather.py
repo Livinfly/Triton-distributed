@@ -704,16 +704,16 @@ def _forward_push_2d_ll_kernel(
     symm_ll_buffer,
     nnodes: tl.constexpr,
     world_size: tl.constexpr,
-    rank,
+    rank,   # cur_ag_global_rank
     signal_target,
 ):
     local_world_size = world_size // nnodes
     local_rank = rank % local_world_size
-    nid = rank // local_world_size
+    nid = rank // local_world_size  # node_id
 
-    pid = tl.program_id(0)
-    peer_nid = pid // local_world_size
-    peer_local_rank = pid % local_world_size
+    pid = tl.program_id(0)  # cur_working_global_rank (split nbytes)
+    peer_nid = pid // local_world_size  # cur_working_node
+    peer_local_rank = pid % local_world_size    # cur_working_node_rank
     thread_idx = tid(0)
     num_ints = bytes_per_rank // 4
 
@@ -745,7 +745,7 @@ def _forward_push_2d_ll_kernel(
             if wid < nnodes and wid != nid:  # wid -> peer node id
                 peer_to = wid * local_world_size + local_rank
                 libshmem_device.putmem_nbi_warp(
-                    ll_buffer_int8 + rank * bytes_per_rank * 2,
+                    ll_buffer_int8 + rank * bytes_per_rank * 2, # peer
                     ll_buffer_int8 + rank * bytes_per_rank * 2,
                     bytes_per_rank * 2,
                     peer_to,
@@ -767,7 +767,7 @@ def _forward_push_2d_ll_kernel(
                 libshmem_device.signal_wait_until(symm_flag + segment, libshmem_device.NVSHMEM_CMP_EQ, signal_target)
             __syncthreads()
         libshmem_device.putmem_signal_block(
-            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + segment * bytes_per_rank,
+            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + segment * bytes_per_rank, # peer
             tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + segment * bytes_per_rank,
             bytes_per_rank,
             symm_flag + segment,

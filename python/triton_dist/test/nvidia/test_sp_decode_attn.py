@@ -179,10 +179,11 @@ def test_triton_decode_with_paged_kv(args) -> None:
         block_tables_shift = torch.cat(block_tables_list_shift, dim=-1)
         block_tables_this_rank = block_tables_list[args.rank]
         torch.distributed.all_gather(block_tables_list, block_tables_this_rank, group=args.default_group)
-        block_tables = torch.cat(block_tables_list, dim=-1) + block_tables_shift
+        block_tables = torch.cat(block_tables_list, dim=-1) + block_tables_shift    # [num_seqs, max_num_blocks_all-rank]
 
-        global_kv_lens = [i * args.num_ranks for i in kv_lens_per_rank]
+        global_kv_lens = [i * args.num_ranks for i in kv_lens_per_rank]    # all-rank kv_lens
         kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=query.device)
+        # [num_ranks, kv_lens]
         global_kv_lens_tensor = torch.cat([kv_lens_tensor.view(1, -1) for _ in range(args.num_ranks)], dim=0)
 
         query = torch.randn_like(query)

@@ -140,7 +140,7 @@ def kernel_gqa_fwd_batch_decode_split_kv(
     # strides
     stride_q_bs,
     stride_q_h,
-    stride_k_cache_bs,
+    stride_k_cache_bs, # stride_k_cache_n
     stride_k_cache_h,
     stride_v_cache_bs,
     stride_v_cache_h,
@@ -163,22 +163,26 @@ def kernel_gqa_fwd_batch_decode_split_kv(
     V_DIM: tl.constexpr,
 ):
     bid = tl.program_id(0)
+    # `hid``, `q_head` block_i sharing kv
     hid = tl.program_id(1)
+    # `kv_hid`, logical start index of sharing kv, corresponding to `hid` block_i
     kv_hid = hid // tl.cdiv(kv_group_num, BLOCK_H)
     split_kv_id = tl.program_id(2)
-
+    # VALID_BLOCK_H, start offset
+    # BLOCK_H, hardware efficient size
     if kv_group_num > BLOCK_H:
         VALID_BLOCK_H: tl.constexpr = BLOCK_H
     else:
         VALID_BLOCK_H: tl.constexpr = kv_group_num
-
+    # cur q_heads
     cur_head = hid * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
     mask_h = (cur_head < (hid + 1) * VALID_BLOCK_H) & (cur_head < q_head_num)
-
+    # dim_q/k_head, dim_v_head
     offs_d = tl.arange(0, BLOCK_HEAD_DIM)
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < K_DIM
     mask_dv = offs_dv < V_DIM
+    # 1 batch a time, seq_kv_len
     cur_kv_seq_len = tl.load(kv_length_ptr + bid)
 
     offs_q = bid * stride_q_bs + cur_head[:, None] * stride_q_h + offs_d[None, :]
@@ -224,8 +228,8 @@ def kernel_gqa_fwd_batch_decode_split_kv(
         v = tl.load(v_cache_ptr + offs_cache_v, mask=(offs_n[:, None] < split_kv_end) & mask_dv[None, :], other=0.0)
 
         n_e_max = tl.maximum(tl.max(qk, 1), e_max)
-        re_scale = libdevice.fast_expf(e_max - n_e_max)
-        p = libdevice.fast_expf(qk - n_e_max[:, None])
+        re_scale = libdevice.fast_expf(e_max - n_e_max) # (-inf) - (-inf) ?
+        p = libdevice.fast_expf(qk - n_e_max[:, None]) # (-inf) - (-inf) ?
         acc *= re_scale[:, None]
         acc += tl.dot(p.to(v.dtype), v)
 
@@ -318,12 +322,12 @@ def kernel_gqa_fwd_batch_decode_combine_kv(
     stride_oh,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
-    Lv: tl.constexpr,
+    Lv: tl.constexpr, # V_DIM
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch) # ？
 
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lv
@@ -443,6 +447,7 @@ def kernel_intra_rank_gqa_fwd_batch_decode_combine_kv(
         acc / e_sum,
         mask=mask_d,
     )
+    # more lse
     tl.store(
         o + cur_batch * stride_obs + cur_head * stride_oh + Lv,
         e_max + tl.log(e_sum),
@@ -490,14 +495,14 @@ def kernel_inter_rank_gqa_fwd_batch_decode_combine_kv(
     stride_mid_os,
     stride_obs,
     stride_oh,
-    NUM_KV_SPLITS: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,    # num_ranks
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
-    cur_batch_seq_len_ptr = B_Seqlens + cur_batch
+    cur_batch_seq_len_ptr = B_Seqlens + cur_batch   # batch_id = 0
 
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lv
@@ -573,7 +578,7 @@ def get_triton_persistent_algo_info(q_heads, kv_heads, q_head_dim, v_head_dim, p
         page_size, "soft_cap": soft_cap, "K_DIM": q_head_dim, "V_DIM": v_head_dim, "num_warps": 8, "num_stages": 2
     }
 
-
+# single-node, single-gpu?, persistent kernel, split & combine with output
 @aot_compile_spaces({
     "gqa_fwd_batch_decode_split_kv_persistent_fp16_fp16_fp16": {
         "signature":
@@ -759,7 +764,7 @@ def kernel_gqa_fwd_batch_decode_split_kv_persistent(
             mask=mask_d,
         )
 
-
+# single-node, single-gpu?, split & combine with output
 def gqa_fwd_batch_decode(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_table, scale, soft_cap=0.0,
                          output_split=None, output_combine=None, kv_split=-1):
     batch, q_heads, q_head_dim = q.shape
@@ -843,7 +848,7 @@ def gqa_fwd_batch_decode(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_
 
     return output_combine
 
-
+# single-node, single-gpu?, split & combine with output and lse 
 def gqa_fwd_batch_decode_intra_rank(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_table, scale, soft_cap=0.0,
                                     output_split=None, output_combine=None, kv_split=-1):
     batch, q_heads, q_head_dim = q.shape
@@ -863,9 +868,10 @@ def gqa_fwd_batch_decode_intra_rank(q, k_cache, v_cache, workspace, q_lens, kv_l
     NUM_KV_SPLITS = 32 if kv_split == -1 else kv_split
 
     grid_split_kv = (batch, triton.cdiv(q_heads, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
-
+    # dtype=q.dtype
     output_split = torch.empty([batch, q_heads, NUM_KV_SPLITS, v_head_dim +
                                 1], dtype=q.dtype, device=q.device) if output_split is None else output_split
+    # keep lse
     output_combine = torch.empty([batch, q_heads, v_head_dim +
                                   1], dtype=q.dtype, device=q.device) if output_combine is None else output_combine
 
@@ -906,7 +912,7 @@ def gqa_fwd_batch_decode_intra_rank(q, k_cache, v_cache, workspace, q_lens, kv_l
         num_warps=4,
         num_stages=2,
     )
-
+    # intra- combine
     kernel_intra_rank_gqa_fwd_batch_decode_combine_kv[(batch, q_heads)](
         output_split,
         output_combine,

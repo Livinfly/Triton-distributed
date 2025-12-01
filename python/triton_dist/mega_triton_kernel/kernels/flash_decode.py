@@ -65,7 +65,7 @@ def attn_gqa_fwd_batch_decode_split_kv_task_compute(
 
     stride_table_bs: tl.constexpr = MAX_NUM_BLOCKS_PER_SEQ
     # stride_table_bs: tl.constexpr = PAGE_SIZE * NUM_KV_HEADS * K_HEAD_DIM
-    stride_k_cache_bs: tl.constexpr = NUM_KV_HEADS * K_HEAD_DIM
+    stride_k_cache_bs: tl.constexpr = NUM_KV_HEADS * K_HEAD_DIM # stride_k_cache_n
     stride_k_cache_h: tl.constexpr = K_HEAD_DIM
     stride_v_cache_bs: tl.constexpr = NUM_KV_HEADS * V_HEAD_DIM
     stride_v_cache_h: tl.constexpr = V_HEAD_DIM
